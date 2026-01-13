@@ -8,17 +8,22 @@ const PORT = process.env.PORT || 10000;
 const GREEN_API_ID = process.env.GREEN_API_ID;
 const GREEN_API_TOKEN = process.env.GREEN_API_TOKEN;
 
-// ✅ הקבוצה המורשית בלבד
+// ✅ קבוצה מורשית בלבד
 const ALLOWED_GROUPS = [
   "120363422161709210@g.us"
 ];
 
-// 🔍 בדיקת קישור / ספאם
+// 🔗 בדיקת קישור
 function containsLink(text) {
   return /(https?:\/\/|www\.|\.com|\.co|\.il|\.net)/i.test(text);
 }
 
-// 🛒 מוצרים לדוגמה (בשלב הבא מוחלף באלי אקספרס אמיתי)
+// 🟢 קישור אלי אקספרס – מותר
+function isAliExpressLink(text) {
+  return /(aliexpress\.com|s\.click\.aliexpress\.com)/i.test(text);
+}
+
+// 🛒 מוצרים לדוגמה
 function mockAliExpressProducts(query) {
   return [
     {
@@ -34,7 +39,7 @@ function mockAliExpressProducts(query) {
       link: "https://s.click.aliexpress.com/example2"
     },
     {
-      title: `${query} הנמכר ביותר`,
+      title: `${query} נמכר ביותר`,
       price: "39 ₪",
       rating: "⭐ 4.5",
       link: "https://s.click.aliexpress.com/example3"
@@ -48,12 +53,10 @@ function mockAliExpressProducts(query) {
   ];
 }
 
-// 🌐 בדיקת שרת
 app.get("/", (req, res) => {
   res.send("🤖 WhatsApp bot is running");
 });
 
-// 📩 Webhook
 app.post("/webhook", async (req, res) => {
   try {
     const message =
@@ -61,65 +64,47 @@ app.post("/webhook", async (req, res) => {
       req.body.messageData?.extendedTextMessageData?.text;
 
     const chatId = req.body.senderData?.chatId;
+    const idMessage = req.body.idMessage;
 
     if (!message || !chatId) return res.sendStatus(200);
 
-    // ❌ רק קבוצות מורשות
+    // ❌ רק קבוצה מורשית
     if (!ALLOWED_GROUPS.includes(chatId)) return res.sendStatus(200);
 
-    const cleanMessage = message.trim();
+    const text = message.trim();
 
-    // ❌ מחיקת קישורים / ספאם
-    if (containsLink(cleanMessage)) {
+    // ❌ קישור לא קשור → מחיקה
+    if (containsLink(text) && !isAliExpressLink(text)) {
       await axios.post(
         `https://api.green-api.com/waInstance${GREEN_API_ID}/deleteMessage/${GREEN_API_TOKEN}`,
-        {
-          chatId,
-          idMessage: req.body.idMessage
-        }
+        { chatId, idMessage }
       );
       return res.sendStatus(200);
     }
 
     // ✅ בדיקה
-    if (cleanMessage === "בדיקה") {
+    if (text === "בדיקה") {
       await axios.post(
         `https://api.green-api.com/waInstance${GREEN_API_ID}/sendMessage/${GREEN_API_TOKEN}`,
-        {
-          chatId,
-          message: "בוט תקין 🤖"
-        }
+        { chatId, message: "בוט תקין 🤖" }
       );
       return res.sendStatus(200);
     }
 
     // 🔎 חפשי לי ...
-    if (cleanMessage.startsWith("חפשי לי ")) {
-      const query = cleanMessage.replace("חפשי לי", "").trim();
+    if (text.startsWith("חפשי לי ")) {
+      const query = text.replace("חפשי לי", "").trim();
 
-      if (!query) {
-        await axios.post(
-          `https://api.green-api.com/waInstance${GREEN_API_ID}/sendMessage/${GREEN_API_TOKEN}`,
-          {
-            chatId,
-            message: "❌ לא ציינת מוצר לחיפוש"
-          }
-        );
-        return res.sendStatus(200);
-      }
+      if (!query) return res.sendStatus(200);
 
-      // ⏳ הודעת ביניים
       await axios.post(
         `https://api.green-api.com/waInstance${GREEN_API_ID}/sendMessage/${GREEN_API_TOKEN}`,
-        {
-          chatId,
-          message: "שניה אחת 1️⃣"
-        }
+        { chatId, message: "שניה אחת 1️⃣" }
       );
 
       const products = mockAliExpressProducts(query);
 
-      let reply = `🔎 חיפשתי עבורך: *${query}*\n\n`;
+      let reply = `🔎 *${query}*\n\n`;
 
       products.forEach((p, i) => {
         reply += `*${i + 1}. ${p.title}*\n`;
@@ -130,27 +115,18 @@ app.post("/webhook", async (req, res) => {
 
       await axios.post(
         `https://api.green-api.com/waInstance${GREEN_API_ID}/sendMessage/${GREEN_API_TOKEN}`,
-        {
-          chatId,
-          message: reply
-        }
+        { chatId, message: reply }
       );
 
       return res.sendStatus(200);
     }
 
-    // ❌ כל דבר אחר – נמחק
-    await axios.post(
-      `https://api.green-api.com/waInstance${GREEN_API_ID}/deleteMessage/${GREEN_API_TOKEN}`,
-      {
-        chatId,
-        idMessage: req.body.idMessage
-      }
-    );
-
+    // ❌ כל טקסט אחר – לא נמחק, פשוט מתעלמים
     res.sendStatus(200);
+
   } catch (err) {
     console.error("❌ ERROR:", err.message);
+    q;
     res.sendStatus(200);
   }
 });
