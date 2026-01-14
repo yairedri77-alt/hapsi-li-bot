@@ -128,6 +128,7 @@ async function handleSearch(chatId, query) {
 
 /* ================= WEBHOOK ================= */
 app.post("/webhook", (req, res) => {
+  console.log("📩 WEBHOOK HIT");
   res.sendStatus(200); // <<< הכי חשוב – עונים מיד
 
   const chatId =
