@@ -5,33 +5,32 @@ const crypto = require("crypto");
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-/* ===== ENV ===== */
+/* ================= ENV ================= */
 const {
   GREEN_API_ID,
   GREEN_API_TOKEN,
   ALI_APP_KEY,
   ALI_APP_SECRET,
   ALI_TRACKING_ID,
-  ALI_CURRENCY = "ILS",
-  ALI_LANGUAGE = "HE"
+  ILS_RATE = 3.7,
 } = process.env;
 
 const GREEN_BASE = "https://api.green-api.com";
 const ALI_API = "https://gw.api.taobao.com/router/rest";
 
-/* ===== Utils ===== */
-function tsChina() {
+/* ================= HELPERS ================= */
+function chinaTime() {
   const d = new Date();
-  const p = n => String(n).padStart(2, "0");
+  const p = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 function sign(params) {
   const keys = Object.keys(params).sort();
-  let base = ALI_APP_SECRET;
-  for (const k of keys) base += k + params[k];
-  base += ALI_APP_SECRET;
-  return crypto.createHash("md5").update(base).digest("hex").toUpperCase();
+  let s = ALI_APP_SECRET;
+  for (const k of keys) s += k + params[k];
+  s += ALI_APP_SECRET;
+  return crypto.createHash("md5").update(s).digest("hex").toUpperCase();
 }
 
 async function aliCall(method, extra) {
@@ -39,146 +38,117 @@ async function aliCall(method, extra) {
     method,
     app_key: ALI_APP_KEY,
     sign_method: "md5",
-    timestamp: tsChina(),
+    timestamp: chinaTime(),
     format: "json",
     v: "2.0",
-    ...extra
+    ...extra,
   };
-  params.sign = sign(params);
 
-  const { data } = await axios.post(ALI_API, null, {
-    params,
-    timeout: 15000
-  });
+  const { data } = await axios.post(
+    ALI_API,
+    null,
+    { params: { ...params, sign: sign(params) }, timeout: 10000 }
+  );
 
   if (JSON.stringify(data).includes("error_response")) {
-    throw new Error("ALI ERROR");
+    throw new Error("ALI API ERROR");
   }
   return data;
 }
 
-/* ===== Green API ===== */
 async function sendText(chatId, text) {
   await axios.post(
     `${GREEN_BASE}/waInstance${GREEN_API_ID}/sendMessage/${GREEN_API_TOKEN}`,
     { chatId, message: text },
-    { timeout: 15000 }
+    { timeout: 10000 }
   );
 }
 
-async function sendImage(chatId, image, caption) {
+async function sendImage(chatId, imageUrl, caption) {
   await axios.post(
     `${GREEN_BASE}/waInstance${GREEN_API_ID}/sendFileByUrl/${GREEN_API_TOKEN}`,
     {
       chatId,
-      urlFile: image,
+      urlFile: imageUrl,
       fileName: "product.jpg",
-      caption
+      caption,
     },
-    { timeout: 20000 }
+    { timeout: 15000 }
   );
 }
 
-/* ===== Ali logic ===== */
-async function searchAli(query) {
-  const data = await aliCall("aliexpress.affiliate.product.query", {
-    keywords: query,
-    page_no: 1,
-    page_size: 20,
-    tracking_id: ALI_TRACKING_ID,
-    target_currency: ALI_CURRENCY,
-    target_language: ALI_LANGUAGE
-  });
-
-  const list =
-    data?.aliexpress_affiliate_product_query_response
-      ?.resp_result?.result?.products?.product || [];
-
-  return Array.isArray(list) ? list.slice(0, 4) : [];
-}
-
-async function genLinks(urls) {
-  if (!urls.length) return new Map();
-
-  const data = await aliCall("aliexpress.affiliate.link.generate", {
-    tracking_id: ALI_TRACKING_ID,
-    promotion_link_type: 0,
-    source_values: urls.join(",")
-  });
-
-  const links =
-    data?.aliexpress_affiliate_link_generate_response
-      ?.resp_result?.result?.promotion_links?.promotion_link || [];
-
-  const map = new Map();
-  for (const l of links) {
-    if (l?.source_value && l?.promotion_link) {
-      map.set(l.source_value, l.promotion_link);
-    }
-  }
-  return map;
-}
-
-/* ===== Routes ===== */
-app.get("/", (_, res) => res.send("OK"));
-
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // חשוב: לא לחכות
-
+/* ================= LOGIC ================= */
+async function handleSearch(chatId, query) {
   try {
-    const chatId =
-      req.body?.senderData?.chatId ||
-      req.body?.messageData?.chatId;
-
-    const text =
-      req.body?.messageData?.textMessageData?.textMessage || "";
-
-    if (!chatId || !text) return;
-
-    if (text.trim() === "בדיקה") {
-      await sendText(chatId, "🤖 בוט תקין");
-      return;
-    }
-
-    const m = text.match(/^חפשי לי\s+(.+)/);
-    if (!m) return;
-
-    const query = m[1].trim();
-    await sendText(chatId, "מחפש עבורך… 🔥 זה לוקח כ־5–7 שניות");
-
-    const products = await searchAli(query);
-    if (!products.length) {
-      await sendText(chatId, "לא מצאתי תוצאות כרגע 😕");
-      return;
-    }
-
-    const urls = products
-      .map(p => p.product_detail_url)
-      .filter(Boolean);
-
-    const aff = await genLinks(urls);
-
-    const lines = ["🛒 מצאתי 4 אפשרויות טובות:"];
-    products.forEach((p, i) => {
-      const price = p.target_sale_price || p.sale_price || "";
-      const link = aff.get(p.product_detail_url) || p.product_detail_url;
-      lines.push(
-        `\n${i+1}. ${p.product_title}\n💰 ${price} שקלים\n🔗 ${link}`
-      );
+    const data = await aliCall("aliexpress.affiliate.product.query", {
+      keywords: query,
+      page_no: 1,
+      page_size: 20,
+      tracking_id: ALI_TRACKING_ID,
+      target_currency: "USD",
     });
 
-    const img = products[0]?.product_main_image_url;
-    if (img) {
-      await sendImage(chatId, img, lines.join("\n"));
+    const products =
+      data?.aliexpress_affiliate_product_query_response?.resp_result?.result?.products?.product || [];
+
+    if (!products.length) {
+      await sendText(chatId, "לא מצאתי תוצאות 😕");
+      return;
+    }
+
+    const top = products.slice(0, 4);
+    const image =
+      top[0]?.product_main_image_url ||
+      top[0]?.main_image_url;
+
+    let msg = "🛒 מצאתי עבורך 👇\n";
+
+    top.forEach((p, i) => {
+      const usd = parseFloat(p.target_sale_price || p.sale_price || 0);
+      const ils = Math.round(usd * ILS_RATE);
+      msg += `\n${i+1}. ${p.product_title}\n💰 ${ils} שקלים\n🔗 ${p.product_detail_url}\n`;
+    });
+
+    if (image) {
+      await sendImage(chatId, image, msg);
     } else {
-      await sendText(chatId, lines.join("\n"));
+      await sendText(chatId, msg);
     }
 
   } catch (e) {
-    console.error("BOT ERROR:", e.message);
+    console.error("SEARCH FAIL:", e.message);
+    await sendText(chatId, "⚠️ הייתה בעיה זמנית, נסה שוב עוד רגע");
   }
+}
+
+/* ================= WEBHOOK ================= */
+app.post("/webhook", (req, res) => {
+  res.sendStatus(200); // <<< הכי חשוב – עונים מיד
+
+  const chatId =
+    req.body?.senderData?.chatId ||
+    req.body?.messageData?.chatId;
+
+  const text =
+    req.body?.messageData?.textMessageData?.textMessage ||
+    "";
+
+  if (!chatId || !text) return;
+
+  if (text === "בדיקה") {
+    sendText(chatId, "בוט תקין 🤖");
+    return;
+  }
+
+  const m = text.match(/^חפשי לי (.+)/);
+  if (!m) return;
+
+  sendText(chatId, "🔍 מחפש עבורך... תן לי כמה שניות 🔥");
+  setTimeout(() => handleSearch(chatId, m[1]), 100);
 });
 
-/* ===== Start ===== */
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("✅ Server running on", PORT));
+app.get("/", (_, res) => res.send("OK"));
+
+app.listen(process.env.PORT || 10000, () =>
+  console.log("✅ Bot ready")
+);
