@@ -138,6 +138,7 @@ app.post("/webhook", (req, res) => {
   const text =
     req.body?.messageData?.textMessageData?.textMessage ||
     "";
+  console.log("📝 TEXT:", text);
 
   if (!chatId || !text) return;
 
