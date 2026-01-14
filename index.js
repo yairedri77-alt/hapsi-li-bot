@@ -303,14 +303,13 @@ app.post("/webhook", async (req, res) => {
     const chatId = extractChatId(req.body);
     const text = extractText(req.body);
 
-    console.log("📩 WEBHOOK HIT | chatId:", chatId);
-    console.log("📝 TEXT:", text);
-
     if (!chatId || !text) return;
 
-    // ✅ פילטר: רק הקבוצה/צ'אט שאתה רוצה
-    if (ALLOW_CHAT_ID && chatId !== ALLOW_CHAT_ID) return;
+// ✅ פילטר: רק הקבוצה/צ'אט שאתה רוצה (לפני לוגים!)
+if (ALLOW_CHAT_ID && chatId !== ALLOW_CHAT_ID) return;
 
+console.log("📩 WEBHOOK HIT | chatId:", chatId);
+console.log("📝 TEXT:", text);
     // בדיקה
     if (text === "בדיקה") {
       await greenSendMessage(chatId, "בוט תקין 🤖");
