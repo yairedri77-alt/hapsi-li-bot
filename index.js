@@ -1,3 +1,26 @@
+/**
+ * ✅ hapshi-li-bot (Green-API + AliExpress Affiliate)
+ *
+ * מה הקוד עושה בדיוק לפי הבקשה שלך:
+ * 1) קורא רק מהקבוצה הזו: 120363422161709210@g.us (ולא שום קבוצה אחרת)
+ * 2) "בדיקה" => מחזיר "בוט תקין 🤖"
+ * 3) "חפשי לי ..." => מחזיר הודעת "מחפש עבורך... 5–7 שניות 🔥" ואז שולח מודעה אחת מסודרת (מוצר אחד)
+ * 4) אם יש תקלה — מדפיס בלוגים "מה התקלה" + שולח לך הודעת שגיאה עם הסיבה (בקצרה וברור)
+ *
+ * ENV שחייבים להיות מוגדרים ב-Render:
+ * GREEN_API_ID
+ * GREEN_API_TOKEN
+ * ALI_APP_KEY
+ * ALI_APP_SECRET
+ * ALI_TRACKING_ID
+ *
+ * אופציונלי:
+ * ALLOW_CHAT_ID (אם תרצה לשנות קבוצה בעתיד בלי לשנות קוד)
+ * ALI_CURRENCY (ברירת מחדל ILS)
+ * ALI_LANGUAGE (ברירת מחדל HE)
+ * ILS_RATE (ברירת מחדל 3.7 - רק אם המחיר מגיע כ-USD)
+ */
+
 const express = require("express");
 const axios = require("axios");
 const crypto = require("crypto");
@@ -19,19 +42,17 @@ const {
   ALI_CURRENCY = "ILS",
   ALI_LANGUAGE = "HE",
 
-  // ✅ רק הקבוצה הזאת תעבוד (chatId של הקבוצה)
-  // דוגמה: 120363422161709210@g.us
-  ALLOW_CHAT_ID = "",
-
-  // אופציונלי: אם תרצה להמיר מדולר לשקלים במקרה שה־API מחזיר USD
   ILS_RATE = "3.7",
+
+  // אם לא תשים ENV - זה ינעל על הקבוצה שנתת
+  ALLOW_CHAT_ID = "120363422161709210@g.us",
 } = process.env;
 
 const GREEN_BASE = "https://api.green-api.com";
 const ALI_API = "https://gw.api.taobao.com/router/rest";
 
 /* =========================
-   HELPERS
+   REQUIRED ENV CHECK
 ========================= */
 function assertEnv() {
   const missing = [];
@@ -41,8 +62,10 @@ function assertEnv() {
   if (missing.length) throw new Error("Missing env vars: " + missing.join(", "));
 }
 
+/* =========================
+   SMALL UTILS
+========================= */
 function tsChina() {
-  // gateway אוהב: YYYY-MM-DD HH:mm:ss
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
@@ -60,6 +83,77 @@ function makeSign(params, secret) {
   return crypto.createHash("md5").update(base, "utf8").digest("hex").toUpperCase();
 }
 
+function toNumberLoose(x) {
+  const s = String(x ?? "");
+  const n = Number(s.replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function formatPriceToShekels(priceStr) {
+  const raw = String(priceStr ?? "").trim();
+  const n = toNumberLoose(raw);
+  if (!n) return "";
+
+  // Heuristic קטן: אם יש $, USD, US $ וכו'
+  const looksUsd = /usd|\$|us\s*\$/i.test(raw);
+  const rate = Number(ILS_RATE) || 3.7;
+
+  const ils = looksUsd ? n * rate : n;
+  const rounded = Math.round(ils);
+
+  return `${rounded} שקלים`;
+}
+
+function safeShort(s, max = 120) {
+  const t = String(s || "").replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max - 1) + "…" : t;
+}
+
+/* =========================
+   GREEN API HELPERS
+========================= */
+function extractChatId(body) {
+  return body?.senderData?.chatId || body?.chatId || body?.messageData?.chatId || "";
+}
+
+function extractText(body) {
+  const text =
+    body?.messageData?.textMessageData?.textMessage ||
+    body?.messageData?.extendedTextMessageData?.text ||
+    body?.messageData?.quotedMessage?.textMessageData?.textMessage ||
+    body?.messageData?.quotedMessage?.extendedTextMessageData?.text ||
+    body?.text ||
+    "";
+  return String(text || "").trim();
+}
+
+function getWebhookType(body) {
+  // Green-API בדרך כלל שולח typeWebhook
+  return String(body?.typeWebhook || "").trim();
+}
+
+async function greenSendMessage(chatId, message) {
+  const url = `${GREEN_BASE}/waInstance${GREEN_API_ID}/sendMessage/${GREEN_API_TOKEN}`;
+  await axios.post(url, { chatId, message }, { timeout: 45000 });
+}
+
+async function greenSendImageByUrl(chatId, imageUrl, caption) {
+  const url = `${GREEN_BASE}/waInstance${GREEN_API_ID}/sendFileByUrl/${GREEN_API_TOKEN}`;
+  await axios.post(
+    url,
+    {
+      chatId,
+      urlFile: imageUrl,
+      fileName: "product.jpg",
+      caption,
+    },
+    { timeout: 65000 }
+  );
+}
+
+/* =========================
+   ALI API (WITH RETRIES)
+========================= */
 async function aliCall(method, extraParams = {}) {
   const baseParams = {
     method,
@@ -73,89 +167,37 @@ async function aliCall(method, extraParams = {}) {
 
   const sign = makeSign(baseParams, ALI_APP_SECRET);
 
-  const { data } = await axios.post(ALI_API, null, {
-    params: { ...baseParams, sign },
-    timeout: 35000, // יותר זמן כדי לא ליפול
-  });
+  const attempts = 3;
+  let lastErr;
 
-  return data;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const { data } = await axios.post(ALI_API, null, {
+        params: { ...baseParams, sign },
+        timeout: 65000, // ✅ יותר זמן
+      });
+      return data;
+    } catch (err) {
+      lastErr = err;
+      const msg = String(err?.message || "");
+      const isTimeout = msg.includes("timeout");
+      const isNet =
+        msg.includes("ECONN") || msg.includes("ENOTFOUND") || msg.includes("ETIMEDOUT") || msg.includes("socket hang up");
+
+      console.error(`ALI CALL FAIL (try ${i}/${attempts}) | method=${method} |`, msg);
+
+      if (!isTimeout && !isNet) throw err;
+      await new Promise((r) => setTimeout(r, 900 * i));
+    }
+  }
+
+  throw lastErr;
 }
 
-function extractText(body) {
-  const text =
-    body?.messageData?.textMessageData?.textMessage ||
-    body?.messageData?.extendedTextMessageData?.text ||
-    body?.messageData?.quotedMessage?.textMessageData?.textMessage ||
-    body?.messageData?.quotedMessage?.extendedTextMessageData?.text ||
-    body?.text ||
-    "";
-
-  return String(text || "").trim();
-}
-
-function extractChatId(body) {
-  return body?.senderData?.chatId || body?.chatId || body?.messageData?.chatId || "";
-}
-
-async function greenSendMessage(chatId, message) {
-  const url = `${GREEN_BASE}/waInstance${GREEN_API_ID}/sendMessage/${GREEN_API_TOKEN}`;
-  await axios.post(url, { chatId, message }, { timeout: 30000 });
-}
-
-async function greenSendImageByUrl(chatId, imageUrl, caption) {
-  const url = `${GREEN_BASE}/waInstance${GREEN_API_ID}/sendFileByUrl/${GREEN_API_TOKEN}`;
-  await axios.post(
-    url,
-    {
-      chatId,
-      urlFile: imageUrl,
-      fileName: "product.jpg",
-      caption,
-    },
-    { timeout: 45000 }
-  );
-}
-
-function toNumberLoose(x) {
-  const s = String(x ?? "");
-  const n = Number(s.replace(/[^\d.]/g, ""));
-  return Number.isFinite(n) ? n : 0;
-}
-
-function formatPriceToShekels(priceStr) {
-  const n = toNumberLoose(priceStr);
-  if (!n) return "";
-
-  const looksUsd = /usd|\$|us\s*\$/i.test(String(priceStr));
-  const rate = Number(ILS_RATE) || 3.7;
-  const ils = looksUsd ? n * rate : n;
-
-  const rounded = Math.round(ils);
-  return `${rounded} שקלים`;
-}
-
-function pickTop4(products) {
-  return (products || [])
-    .map((p) => {
-      const price = toNumberLoose(p.target_sale_price || p.sale_price || p.original_price);
-      const orders = toNumberLoose(p.sales || p.volume || p.orders);
-      const rate = toNumberLoose(p.evaluate_rate || p.score || p.rating);
-
-      const score = orders * 0.6 + rate * 25 - price * 0.25;
-      return { p, score };
-    })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 4)
-    .map((x) => x.p);
-}
-
-/* =========================
-   ALI LOGIC
-========================= */
 function safeAliError(data) {
   try {
     const j = JSON.stringify(data);
-    if (j.includes("error_response")) return j.slice(0, 800);
+    if (j.includes("error_response")) return j.slice(0, 900);
     return "";
   } catch {
     return "";
@@ -183,7 +225,7 @@ async function searchAliProducts(query) {
   const data = await aliCall("aliexpress.affiliate.product.query", {
     keywords: query,
     page_no: 1,
-    page_size: 30,
+    page_size: 40,
     target_currency: ALI_CURRENCY,
     target_language: ALI_LANGUAGE,
     tracking_id: ALI_TRACKING_ID,
@@ -196,11 +238,12 @@ async function searchAliProducts(query) {
   return Array.isArray(products) ? products : [];
 }
 
-async function generateAffiliateLinks(productUrls) {
+async function generateAffiliateLink(oneUrl) {
+  // קישור אחד בלבד (כמו שביקשת)
   const data = await aliCall("aliexpress.affiliate.link.generate", {
     tracking_id: ALI_TRACKING_ID,
     promotion_link_type: 0,
-    source_values: productUrls.join(","),
+    source_values: oneUrl,
   });
 
   const err = safeAliError(data);
@@ -212,79 +255,125 @@ async function generateAffiliateLinks(productUrls) {
     [];
 
   const arr = Array.isArray(links) ? links : [];
-  const map = new Map();
-  for (const item of arr) {
-    const src = item?.source_value;
-    const url = item?.promotion_link;
-    if (src && url) map.set(src, url);
-  }
-  return map;
-}
-
-function buildCaption(products, affMap) {
-  const lines = [];
-  lines.push("מצאתי לך 4 אפשרויות טובות 👇");
-
-  products.forEach((p, idx) => {
-    const title = String(p.product_title || p.title || "מוצר").trim();
-    const priceRaw = p.target_sale_price || p.sale_price || p.original_price || "";
-    const priceTxt = priceRaw ? formatPriceToShekels(priceRaw) : "";
-
-    const srcUrl = p.product_detail_url || p.product_url || p.url || "";
-    const aff = (srcUrl && affMap.get(srcUrl)) || srcUrl;
-
-    lines.push("");
-    lines.push(`${idx + 1}. ${title}`);
-    if (priceTxt) lines.push(`💰 ${priceTxt}`);
-    if (aff) lines.push(`🔗 ${aff}`);
-  });
-
-  return lines.join("\n");
+  const first = arr[0];
+  const aff = first?.promotion_link;
+  return aff || "";
 }
 
 /* =========================
-   MAIN SEARCH FLOW (async)
+   PICK ONE PRODUCT (BEST/LOW PRICE)
+========================= */
+function pickBestOne(products) {
+  // ניקוד: מכירות + דירוג - מחיר
+  // (מוצר אחד בלבד)
+  const scored = (products || []).map((p) => {
+    const price = toNumberLoose(p.target_sale_price || p.sale_price || p.original_price);
+    const orders = toNumberLoose(p.sales || p.volume || p.orders);
+    const rate = toNumberLoose(p.evaluate_rate || p.score || p.rating);
+
+    const score = orders * 0.6 + rate * 25 - price * 0.25;
+    return { p, score, price, orders, rate };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0] || null;
+}
+
+/* =========================
+   BUILD ONE BEAUTIFUL AD
+========================= */
+function buildOneAd(sc) {
+  const p = sc.p;
+
+  const title = safeShort(p.product_title || p.title || "מוצר", 110);
+
+  const priceRaw = p.target_sale_price || p.sale_price || p.original_price || "";
+  const priceTxt = priceRaw ? formatPriceToShekels(priceRaw) : "";
+
+  const orders = sc.orders ? `${Math.round(sc.orders).toLocaleString("he-IL")} נרכשו` : "";
+  const rate = sc.rate ? `${sc.rate}⭐` : "";
+
+  // לפעמים יש גם shop / store
+  const store = safeShort(p.shop_name || p.store_name || "", 60);
+
+  const lines = [];
+  lines.push("🔥 מצאתי לך מוצר מומלץ מאלי אקספרס");
+  lines.push("");
+  lines.push(`🛍️ ${title}`);
+  if (store) lines.push(`🏪 ${store}`);
+  if (priceTxt) lines.push(`💰 מחיר: ${priceTxt}`);
+  if (orders) lines.push(`📦 ${orders}`);
+  if (rate) lines.push(`⭐ דירוג: ${rate}`);
+  lines.push("");
+  lines.push("🔗 קישור לרכישה:"); // את הקישור נכניס בהמשך
+
+  return lines;
+}
+
+/* =========================
+   MAIN SEARCH FLOW
 ========================= */
 async function handleSearch(chatId, query) {
+  const started = Date.now();
+
   try {
-    await greenSendMessage(chatId, "🔎 מחפש עבורך… זה לוקח כ־5–7 שניות 🔥");
+    await greenSendMessage(chatId, "🔎 מחפש עבורך… זה לוקח בין 5–7 שניות 🔥");
 
     const productsRaw = await searchAliProducts(query);
     if (!productsRaw.length) {
-      await greenSendMessage(chatId, "לא מצאתי כרגע תוצאות 😕 נסה לרשום בצורה אחרת.");
+      await greenSendMessage(chatId, "לא מצאתי כרגע תוצאות 😕 נסה לכתוב את זה אחרת.");
       return;
     }
 
-    const top4 = pickTop4(productsRaw);
-    if (!top4.length) {
-      await greenSendMessage(chatId, "לא מצאתי כרגע תוצאות 😕 נסה לרשום בצורה אחרת.");
+    const best = pickBestOne(productsRaw);
+    if (!best) {
+      await greenSendMessage(chatId, "לא מצאתי כרגע תוצאה טובה 😕 נסה שוב עוד רגע.");
       return;
     }
 
-    const urls = top4
-      .map((p) => p.product_detail_url || p.product_url || p.url)
-      .filter(Boolean);
+    const p = best.p;
+    const srcUrl = p.product_detail_url || p.product_url || p.url || "";
+    if (!srcUrl) {
+      await greenSendMessage(chatId, "מצאתי מוצר אבל חסר קישור מקור 😕 נסה שוב.");
+      return;
+    }
 
-    const affMap = urls.length ? await generateAffiliateLinks(urls) : new Map();
+    // Affiliate link (עם fallback לקישור רגיל אם נכשל)
+    let finalLink = srcUrl;
+    try {
+      const aff = await generateAffiliateLink(srcUrl);
+      if (aff) finalLink = aff;
+    } catch (e) {
+      console.error("AFF LINK FAIL (fallback to normal):", e?.message || e);
+    }
 
     const imageUrl =
-      top4[0]?.product_main_image_url ||
-      top4[0]?.main_image_url ||
-      top4[0]?.image_url ||
-      "";
+      p.product_main_image_url || p.main_image_url || p.image_url || "";
 
-    const caption = buildCaption(top4, affMap);
+    const adLines = buildOneAd(best);
+    adLines.push(finalLink);
 
+    const caption = adLines.join("\n");
+
+    // שולח תמונה + מודעה
     if (imageUrl) {
       await greenSendImageByUrl(chatId, imageUrl, caption);
     } else {
       await greenSendMessage(chatId, caption);
     }
+
+    const ms = Date.now() - started;
+    console.log(`✅ SEARCH OK | query="${query}" | took ${ms}ms`);
   } catch (err) {
-    console.error("SEARCH ERROR:", err?.message || err);
+    const reason = String(err?.message || err);
+    console.error("❌ SEARCH ERROR:", reason);
+
+    // שולח לך גם למה זה נפל (קצר וברור)
     try {
-      await greenSendMessage(chatId, "⚠️ הייתה בעיה זמנית בחיפוש, נסה שוב עוד רגע.");
-    } catch {}
+      await greenSendMessage(chatId, `⚠️ תקלה בחיפוש: ${safeShort(reason, 160)}\nנסה שוב עוד רגע.`);
+    } catch (e2) {
+      console.error("❌ FAILED TO SEND ERROR MESSAGE:", e2?.message || e2);
+    }
   }
 }
 
@@ -293,43 +382,51 @@ async function handleSearch(chatId, query) {
 ========================= */
 app.get("/", (req, res) => res.status(200).send("OK"));
 
-app.post("/webhook", async (req, res) => {
-  // תמיד מחזירים 200 מייד (כדי לא לקבל timeout)
+app.post("/webhook", (req, res) => {
+  // ✅ תמיד מחזירים 200 מיד כדי ש-Render/GreenAPI לא יעשו timeout
   res.sendStatus(200);
 
-  try {
-    assertEnv();
+  // ריצה אסינכרונית שלא חוסמת את ה-response
+  setImmediate(async () => {
+    try {
+      assertEnv();
 
-    const chatId = extractChatId(req.body);
-    const text = extractText(req.body);
+      const type = getWebhookType(req.body);
+      const chatId = extractChatId(req.body);
+      const text = extractText(req.body);
 
-    if (!chatId || !text) return;
+      // ✅ רק הודעות נכנסות (לא outgoing / status וכו')
+      // אם אצלך typeWebhook לפעמים ריק - לא נחסום, רק נעדיף incoming
+      if (type && type !== "incomingMessageReceived") return;
 
-// ✅ פילטר: רק הקבוצה/צ'אט שאתה רוצה (לפני לוגים!)
-if (ALLOW_CHAT_ID && chatId !== ALLOW_CHAT_ID) return;
+      // ✅ רק הקבוצה שלך - זה העיקר!
+      if (chatId !== ALLOW_CHAT_ID) return;
 
-console.log("📩 WEBHOOK HIT | chatId:", chatId);
-console.log("📝 TEXT:", text);
-    // בדיקה
-    if (text === "בדיקה") {
-      await greenSendMessage(chatId, "בוט תקין 🤖");
-      return;
+      // לוגים
+      console.log("📩 WEBHOOK HIT | type:", type || "(no-type)", "| chatId:", chatId);
+      console.log("📝 TEXT:", text);
+
+      if (!text) return;
+
+      // 1) בדיקה
+      if (text === "בדיקה") {
+        await greenSendMessage(chatId, "בוט תקין 🤖");
+        return;
+      }
+
+      // 2) חפשי לי ...
+      const m = text.match(/^חפשי לי\s+(.+)/);
+      if (!m) return;
+
+      const query = String(m[1] || "").trim();
+      if (!query) return;
+
+      await handleSearch(chatId, query);
+    } catch (err) {
+      console.error("❌ WEBHOOK ERROR:", err?.message || err);
+      // אין פה send למשתמש כי אולי אין chatId / או כבר חזרנו
     }
-
-    // חפשי לי ...
-    const m = text.match(/^חפשי לי\s+(.+)/);
-    if (!m) return;
-
-    const query = String(m[1] || "").trim();
-    if (!query) return;
-
-    // מריצים async בלי לחסום
-    setImmediate(() => {
-      handleSearch(chatId, query);
-    });
-  } catch (err) {
-    console.error("WEBHOOK ERROR:", err?.message || err);
-  }
+  });
 });
 
 /* =========================
