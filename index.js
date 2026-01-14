@@ -81,32 +81,37 @@ async function sendImage(chatId, imageUrl, caption) {
 async function handleSearch(chatId, query) {
   try {
     const data = await aliCall("aliexpress.affiliate.product.query", {
-      keywords: query,
+      keywords: query, // אפשר גם לתרגם לאנגלית בעתיד
       page_no: 1,
       page_size: 20,
       tracking_id: ALI_TRACKING_ID,
-      target_currency: "USD",
+      target_currency: "ILS",
+      target_language: "HE",
     });
 
     const products =
-      data?.aliexpress_affiliate_product_query_response?.resp_result?.result?.products?.product || [];
+      data?.aliexpress_affiliate_product_query_response?.resp_result?.result?.products?.product;
 
-    if (!products.length) {
-      await sendText(chatId, "לא מצאתי תוצאות 😕");
+    if (!Array.isArray(products) || products.length === 0) {
+      await sendText(chatId, "😕 לא מצאתי תוצאות כרגע, נסה לנסח אחרת");
       return;
     }
 
     const top = products.slice(0, 4);
+
     const image =
       top[0]?.product_main_image_url ||
-      top[0]?.main_image_url;
+      top[0]?.main_image_url ||
+      null;
 
-    let msg = "🛒 מצאתי עבורך 👇\n";
+    let msg = "🛒 מצאתי עבורך 4 אפשרויות טובות 👇\n";
 
     top.forEach((p, i) => {
-      const usd = parseFloat(p.target_sale_price || p.sale_price || 0);
-      const ils = Math.round(usd * ILS_RATE);
-      msg += `\n${i+1}. ${p.product_title}\n💰 ${ils} שקלים\n🔗 ${p.product_detail_url}\n`;
+      const title = p.product_title || "מוצר מאלי אקספרס";
+      const price = p.target_sale_price || p.sale_price || "לא זמין";
+      const link = p.product_detail_url || p.product_url;
+
+      msg += `\n${i + 1}. ${title}\n💰 ${price} שקלים\n🔗 ${link}\n`;
     });
 
     if (image) {
@@ -115,9 +120,9 @@ async function handleSearch(chatId, query) {
       await sendText(chatId, msg);
     }
 
-  } catch (e) {
-    console.error("SEARCH FAIL:", e.message);
-    await sendText(chatId, "⚠️ הייתה בעיה זמנית, נסה שוב עוד רגע");
+  } catch (err) {
+    console.error("ALI FAIL:", err.message);
+    await sendText(chatId, "⚠️ הייתה בעיה זמנית בחיפוש, נסה שוב בעוד רגע");
   }
 }
 
