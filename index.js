@@ -135,9 +135,12 @@ app.post("/webhook", (req, res) => {
     req.body?.senderData?.chatId ||
     req.body?.messageData?.chatId;
 
-  const text =
-    req.body?.messageData?.textMessageData?.textMessage ||
-    "";
+ const text =
+  req.body?.messageData?.textMessageData?.text ||
+  req.body?.messageData?.extendedTextMessageData?.text ||
+  req.body?.messageData?.quotedMessage?.textMessageData?.text ||
+  req.body?.text ||
+  "";
   console.log("📝 TEXT:", text);
 
   if (!chatId || !text) return;
