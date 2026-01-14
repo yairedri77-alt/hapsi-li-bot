@@ -19,6 +19,10 @@ const {
   ALI_CURRENCY = "ILS",
   ALI_LANGUAGE = "HE",
 
+  // ✅ רק הקבוצה הזאת תעבוד (chatId של הקבוצה)
+  // דוגמה: 120363422161709210@g.us
+  ALLOW_CHAT_ID = "",
+
   // אופציונלי: אם תרצה להמיר מדולר לשקלים במקרה שה־API מחזיר USD
   ILS_RATE = "3.7",
 } = process.env;
@@ -119,23 +123,18 @@ function toNumberLoose(x) {
 }
 
 function formatPriceToShekels(priceStr) {
-  // אם כבר מגיע ILS מה־API זה בדרך כלל "123.45"
-  // אם מגיע "US $12.34" או משהו - נעשה fallback
   const n = toNumberLoose(priceStr);
   if (!n) return "";
 
-  // אם נראה שזה דולרים (רק heuristic קטן)
   const looksUsd = /usd|\$|us\s*\$/i.test(String(priceStr));
   const rate = Number(ILS_RATE) || 3.7;
   const ils = looksUsd ? n * rate : n;
 
-  // עיגול יפה
   const rounded = Math.round(ils);
   return `${rounded} שקלים`;
 }
 
 function pickTop4(products) {
-  // דירוג פשוט: מכירות + דירוג - מחיר
   return (products || [])
     .map((p) => {
       const price = toNumberLoose(p.target_sale_price || p.sale_price || p.original_price);
@@ -164,7 +163,6 @@ function safeAliError(data) {
 }
 
 function extractAliProducts(data) {
-  // מבנים שונים שקיימים בפועל — נתפוס כמה שיותר “בטוח”
   const candidates = [
     data?.aliexpress_affiliate_product_query_response?.resp_result?.result?.products?.product,
     data?.aliexpress_affiliate_product_query_response?.result?.products?.product,
@@ -199,7 +197,6 @@ async function searchAliProducts(query) {
 }
 
 async function generateAffiliateLinks(productUrls) {
-  // חשוב: link.generate מחזיר mapping לפי source_value
   const data = await aliCall("aliexpress.affiliate.link.generate", {
     tracking_id: ALI_TRACKING_ID,
     promotion_link_type: 0,
@@ -310,6 +307,9 @@ app.post("/webhook", async (req, res) => {
     console.log("📝 TEXT:", text);
 
     if (!chatId || !text) return;
+
+    // ✅ פילטר: רק הקבוצה/צ'אט שאתה רוצה
+    if (ALLOW_CHAT_ID && chatId !== ALLOW_CHAT_ID) return;
 
     // בדיקה
     if (text === "בדיקה") {
