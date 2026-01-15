@@ -383,6 +383,10 @@ async function handleSearch(chatId, query) {
 app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.post("/webhook", (req, res) => {
+     res.sendStatus(200);
+  console.log("🔥 WEBHOOK ARRIVED");
+  console.log("typeWebhook:", req.body?.typeWebhook);
+  console.log("chatId:", req.body?.senderData?.chatId || req.body?.messageData?.chatId || req.body?.chatId);
   // ✅ תמיד מחזירים 200 מיד כדי ש-Render/GreenAPI לא יעשו timeout
   res.sendStatus(200);
 
